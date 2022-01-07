@@ -75,6 +75,8 @@ TASK:
     FORCE_TERMINATE:
         TYPE: "ForceTerminate"
         MAX_ACCUM_FORCE: 0.0
+    DID_PICK_OBJECT:
+        TYPE: "DidPickObjectMeasure"
     PICK_REWARD:
         TYPE: "RearrangePickReward"
         DIST_REWARD: 10.0
@@ -103,6 +105,7 @@ TASK:
         - "FORCE_TERMINATE"
         - "END_EFFECTOR_TO_REST_DISTANCE"
         - "END_EFFECTOR_TO_OBJECT_DISTANCE"
+        - "DID_PICK_OBJECT"
         - "PICK_SUCCESS"
         - "PICK_REWARD"
     ACTIONS:

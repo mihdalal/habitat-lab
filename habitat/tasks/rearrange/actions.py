@@ -327,13 +327,6 @@ class ArmEEAction(SimulatorTaskAction):
         self.ee_target = None
         super().__init__(*args, config=config, sim=sim, **kwargs)
         self._sim: RearrangeSim = sim
-        self.robot_ee_constraints = np.array(
-            [
-                [0.4, 1.2],
-                [-0.7, 0.7],
-                [0.25, 1.5],
-            ]
-        )
 
     def get_ee_pos(self, ):
         cur_ee = self._sim.ik_helper.calc_fk(
@@ -353,8 +346,8 @@ class ArmEEAction(SimulatorTaskAction):
     def apply_ee_constraints(self):
         self.ee_target = np.clip(
             self.ee_target,
-            self.robot_ee_constraints[:, 0],
-            self.robot_ee_constraints[:, 1],
+            self._sim.robot.params.ee_constraint[:, 0],
+            self._sim.robot.params.ee_constraint[:, 1],
         )
 
     def set_desired_ee_pos(self, ee_pos: np.ndarray) -> np.ndarray:
