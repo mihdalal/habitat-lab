@@ -25,6 +25,7 @@ from habitat.tasks.rearrange.grip_actions import (
 )
 from habitat.tasks.rearrange.rearrange_sim import RearrangeSim
 from habitat.tasks.rearrange.utils import rearrange_collision
+import quaternion
 
 
 @registry.register_task_action
@@ -334,12 +335,15 @@ class ArmEEAction(SimulatorTaskAction):
             ]
         )
 
-    def reset(self, *args, **kwargs):
-        super().reset()
+    def get_ee_pos(self, ):
         cur_ee = self._sim.ik_helper.calc_fk(
             np.array(self._sim.robot.arm_joint_pos)
-        )
+        )[:3]
+        return cur_ee
 
+    def reset(self, *args, **kwargs):
+        super().reset()
+        cur_ee = self.get_ee_pos()
         self.ee_target = cur_ee
 
     @property
@@ -355,7 +359,6 @@ class ArmEEAction(SimulatorTaskAction):
 
     def set_desired_ee_pos(self, ee_pos: np.ndarray) -> np.ndarray:
         self.ee_target += np.array(ee_pos)
-
         self.apply_ee_constraints()
 
         ik = self._sim.ik_helper
@@ -388,3 +391,337 @@ class ArmEEAction(SimulatorTaskAction):
             return self._sim.step(HabitatSimActions.ARM_EE)
         else:
             return None
+
+@registry.register_task_action
+class ArmFullEEAction(SimulatorTaskAction):
+    """Uses inverse kinematics (requires pybullet) to apply end-effector full (position+orientation) control for the robot's arm."""
+
+    def __init__(self, *args, config, sim: RearrangeSim, **kwargs):
+        self.ee_target = None
+        super().__init__(*args, config=config, sim=sim, **kwargs)
+        self._sim: RearrangeSim = sim
+        self.robot_ee_constraints = np.array(
+            [
+                [0.4, 1.2],
+                [-0.7, 0.7],
+                [0.25, 1.5],
+            ]
+        )
+
+    def reset(self, *args, **kwargs):
+        super().reset()
+        cur_ee = self._sim.ik_helper.calc_fk(
+            np.array(self._sim.robot.arm_joint_pos)
+        )
+        self.ee_target = cur_ee
+
+    @property
+    def action_space(self):
+        return spaces.Box(shape=(6,), low=-1, high=1, dtype=np.float32)
+
+    def apply_ee_constraints(self):
+        self.ee_target[:3] = np.clip(
+            self.ee_target[:3],
+            self.robot_ee_constraints[:, 0],
+            self.robot_ee_constraints[:, 1],
+        )
+
+    def set_desired_ee_pos(self, ee_pos: np.ndarray) -> np.ndarray:
+        self.ee_target += np.array(ee_pos)
+
+        self.apply_ee_constraints()
+
+        ik = self._sim.ik_helper
+
+        joint_pos = np.array(self._sim.robot.arm_joint_pos)
+        joint_vel = np.zeros(joint_pos.shape)
+
+        ik.set_arm_state(joint_pos, joint_vel)
+        des_joint_pos = ik.calc_ik(self.ee_target)
+        des_joint_pos = list(des_joint_pos)
+        self._sim.robot.arm_motor_pos = des_joint_pos
+
+        return des_joint_pos
+
+    def step(self, ee_pos, should_step=True, **kwargs):
+        ee_pos = np.clip(ee_pos, -1, 1)
+        ee_pos[:3] *= self._config.EE_CTRL_LIM
+        ee_pos[3:6] *= self._config.EE_CTRL_QUAT_LIM
+        quat = self.rpy_to_quat(ee_pos[3:6])
+        ee_pos = np.concatenate((ee_pos[:3], quat))
+        self.set_desired_ee_pos(ee_pos)
+
+        if self._config.get("RENDER_EE_TARGET", False):
+            global_pos = self._sim.robot.base_transformation.transform_point(
+                self.ee_target
+            )
+            self._sim.viz_ids["ee_target"] = self._sim.visualize_position(
+                global_pos, self._sim.viz_ids["ee_target"]
+            )
+        if should_step:
+            return self._sim.step(HabitatSimActions.ARM_EE)
+        else:
+            return None
+
+    def rpy_to_quat(self, rpy):
+        q = quaternion.from_euler_angles(rpy)
+        return np.array([q.x, q.y, q.z, q.w])
+
+@registry.register_task_action
+class ArmRAPSAction(SimulatorTaskAction):
+    """Incorporate the RAPS primitives onto the robot."""
+
+    def __init__(self, *args, config, sim: RearrangeSim, **kwargs):
+        self.ee_target = None
+        super().__init__(*args, config=config, sim=sim, **kwargs)
+        self._sim: RearrangeSim = sim
+        self.robot_ee_constraints = np.array(
+            [
+                [0.4, 1.2],
+                [-0.7, 0.7],
+                [0.25, 1.5],
+            ]
+        )
+
+        # primitives
+        self.primitive_idx_to_name = {
+            0: "move_delta_ee_pose",
+            1: "top_x_y_grasp",
+            2: "lift",
+            3: "drop",
+            4: "move_left",
+            5: "move_right",
+            6: "move_forward",
+            7: "move_backward",
+            8: "open_gripper",
+            9: "close_gripper",
+        }
+        self.primitive_name_to_func = dict(
+            move_delta_ee_pose=self.move_delta_ee_pose,
+            top_x_y_grasp=self.top_x_y_grasp,
+            lift=self.lift,
+            drop=self.drop,
+            move_left=self.move_left,
+            move_right=self.move_right,
+            move_forward=self.move_forward,
+            move_backward=self.move_backward,
+            open_gripper=self.open_gripper,
+            close_gripper=self.close_gripper,
+        )
+        self.primitive_name_to_action_idx = dict(
+            move_delta_ee_pose=[0, 1, 2],
+            top_x_y_grasp=[3, 4, 5, 6],
+            lift=7,
+            drop=8,
+            move_left=9,
+            move_right=10,
+            move_forward=11,
+            move_backward=12,
+            open_gripper=13,
+            close_gripper=14,
+        )
+        self.max_arg_len = 15
+        self.num_primitives = len(self.primitive_name_to_func)
+
+    def reset(self, *args, **kwargs):
+        super().reset()
+
+    @property
+    def action_space(self):
+        action_space_low = -1 * np.ones(self.max_arg_len)
+        action_space_high = np.ones(self.max_arg_len)
+        act_lower_primitive = np.zeros(self.num_primitives)
+        act_upper_primitive = np.ones(self.num_primitives)
+        act_lower = np.concatenate((act_lower_primitive, action_space_low))
+        act_upper = np.concatenate(
+            (
+                act_upper_primitive,
+                action_space_high,
+            )
+        )
+        action_space = spaces.Box(act_lower, act_upper, dtype=np.float32)
+        return action_space
+
+    def apply_ee_constraints(self, ee_target):
+        ee_target = np.clip(
+            ee_target,
+            self.robot_ee_constraints[:, 0],
+            self.robot_ee_constraints[:, 1],
+        )
+        return ee_target
+
+    def set_desired_ee_pos(self, ee_pos: np.ndarray) -> np.ndarray:
+        ee_target = ee_pos + self.get_endeff_pos()
+        ee_target = self.apply_ee_constraints(ee_target)
+
+        ik = self._sim.ik_helper
+
+        joint_pos = np.array(self._sim.robot.arm_joint_pos)
+        joint_vel = np.zeros(joint_pos.shape)
+
+        ik.set_arm_state(joint_pos, joint_vel)
+
+        des_joint_pos = ik.calc_ik(ee_target)
+        des_joint_pos = list(des_joint_pos)
+        self._sim.robot.arm_motor_pos = des_joint_pos
+
+        return des_joint_pos
+
+    def step(self, a, should_step=True, **kwargs):
+        a = np.clip(a, -1.0, 1.0)
+        stats = self.act(a)
+        return stats
+
+    def get_endeff_pos(self,):
+        cur_ee = self._sim.ik_helper.calc_fk(
+            np.array(self._sim.robot.arm_joint_pos)
+        )[:3]
+        return cur_ee
+
+    def get_idx_from_primitive_name(self, primitive_name):
+        for idx, pn in self.primitive_idx_to_name.items():
+            if pn == primitive_name:
+                return idx
+
+    def set_gripper_action(self, gripper_ctrl):
+        if gripper_ctrl > 0.5:
+            # open the gripper
+            pass
+        else:
+            pass
+
+    def _set_action(self, action):
+
+        action = action.copy()
+        pos_ctrl, gripper_ctrl = action[:3], action[3]
+        pos_ctrl *= 0.05
+
+        # Apply action to simulation.
+        self.set_desired_ee_pos(pos_ctrl)
+        self.set_gripper_action(gripper_ctrl)
+
+    def call_render_every_step(self):
+        if self.render_every_step:
+            if self.render_mode == "rgb_array":
+                self.img_array.append(
+                    self.render(
+                        self.render_mode,
+                        self.render_im_shape[0],
+                        self.render_im_shape[1],
+                    )
+                )
+            else:
+                self.render(
+                    self.render_mode,
+                    self.render_im_shape[0],
+                    self.render_im_shape[1],
+                )
+
+    def close_gripper(self, d):
+        total_reward, total_success = 0, 0
+        for _ in range(300):
+            a = np.array([0.0, 0.0, 0.0, 1]) #1 means close the gripper
+            self._set_action(a)
+            self._sim.step(HabitatSimActions.ARM_EE)
+            # self.call_render_every_step()
+        return np.array((total_reward, total_success))
+
+    def open_gripper(self, d):
+        total_reward, total_success = 0, 0
+        for _ in range(300):
+            a = np.array([0.0, 0.0, 0.0, 0]) #0 means open the gripper
+            self._set_action(a)
+            self._sim.step(HabitatSimActions.ARM_EE)
+            # self.call_render_every_step()
+        return np.array((total_reward, total_success))
+
+    def goto_pose(self, pose, grasp=True):
+        total_reward, total_success = 0, 0
+        for i in range(300):
+            delta = pose - self.get_endeff_pos()
+            print(i, np.linalg.norm(delta))
+            if grasp:
+                gripper = 1
+            else:
+                gripper = 0
+            a = np.array([delta[0], delta[1], delta[2], gripper])
+            self._set_action(a)
+            self._sim.step(HabitatSimActions.ARM_EE)
+            # self.call_render_every_step()
+        return np.array((total_reward, total_success))
+
+    def top_x_y_grasp(self, xyzd):
+        x_dist, y_dist, z_dist, d = xyzd
+        stats = self.open_gripper(1)
+        stats += self.move_delta_ee_pose(np.array([x_dist, y_dist, 0]))
+        stats += self.drop(z_dist)
+        stats += self.close_gripper(d)
+        return stats
+
+    def move_delta_ee_pose(self, pose):
+        stats = self.goto_pose(self.get_endeff_pos() + pose)
+        return stats
+
+    def lift(self, z_dist):
+        z_dist = np.maximum(z_dist, 0.0)
+        stats = self.goto_pose(
+            self.get_endeff_pos() + np.array([0.0, 0.0, z_dist]), grasp=True
+        )
+        return stats
+
+    def drop(self, z_dist):
+        z_dist = np.maximum(z_dist, 0.0)
+        stats = self.goto_pose(
+            self.get_endeff_pos() + np.array([0.0, 0.0, -z_dist]), grasp=True
+        )
+        return stats
+
+    def move_left(self, x_dist):
+        x_dist = np.maximum(x_dist, 0.0)
+        stats = self.goto_pose(
+            self.get_endeff_pos() + np.array([-x_dist, 0.0, 0.0]), grasp=True
+        )
+        return stats
+
+    def move_right(self, x_dist):
+        x_dist = np.maximum(x_dist, 0.0)
+        stats = self.goto_pose(
+            self.get_endeff_pos() + np.array([x_dist, 0.0, 0.0]), grasp=True
+        )
+        return stats
+
+    def move_forward(self, y_dist):
+        y_dist = np.maximum(y_dist, 0.0)
+        stats = self.goto_pose(
+            self.get_endeff_pos() + np.array([0.0, y_dist, 0.0]), grasp=True
+        )
+        return stats
+
+    def move_backward(self, y_dist):
+        y_dist = np.maximum(y_dist, 0.0)
+        stats = self.goto_pose(
+            self.get_endeff_pos() + np.array([0.0, -y_dist, 0.0]), grasp=True
+        )
+        return stats
+
+    def break_apart_action(self, a):
+        broken_a = {}
+        for k, v in self.primitive_name_to_action_idx.items():
+            broken_a[k] = a[v]
+        return broken_a
+
+    def act(self, a):
+        primitive_idx, primitive_args = (
+            np.argmax(a[: self.num_primitives]),
+            a[self.num_primitives :],
+        )
+        primitive_name = self.primitive_idx_to_name[primitive_idx]
+        primitive_name_to_action_dict = self.break_apart_action(primitive_args)
+        primitive_action = primitive_name_to_action_dict[primitive_name]
+        primitive = self.primitive_name_to_func[primitive_name]
+        stats = primitive(
+            primitive_action,
+        )
+        return stats
+
+

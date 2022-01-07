@@ -351,8 +351,8 @@ class IkHelper:
             computeForwardKinematics=1,
             physicsClientId=self.pc_id,
         )
-        world_ee = ls[4]
-        return world_ee
+
+        return np.concatenate((np.array(ls[4]), np.array(ls[5])))
 
     def get_joint_limits(self):
         lower = []
@@ -372,7 +372,12 @@ class IkHelper:
         """
         :param targ_ee: 3D target position in the ROBOT BASE coordinate frame
         """
-        js = p.calculateInverseKinematics(
-            self.robo_id, self.pb_link_idx, targ_ee, physicsClientId=self.pc_id
-        )
+        if targ_ee.shape[0] == 7:
+            js = p.calculateInverseKinematics(
+                self.robo_id, self.pb_link_idx, targ_ee[:3], targ_ee[3:7], physicsClientId=self.pc_id
+            )
+        else:
+            js = p.calculateInverseKinematics(
+                self.robo_id, self.pb_link_idx, targ_ee, physicsClientId=self.pc_id
+            )
         return js[: self._arm_len]

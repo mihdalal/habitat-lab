@@ -35,7 +35,7 @@ def get_env_class(env_name: str) -> Type[habitat.RLEnv]:
 class RearrangeRLEnv(habitat.RLEnv):
     def __init__(self, config: Config, dataset: Optional[Dataset] = None):
         self._rl_config = config.RL
-        self._core_env_config = config.TASK_CONFIG
+        self._core_env_config = config
         self._reward_measure_name = self._rl_config.REWARD_MEASURE
         self._success_measure_name = self._rl_config.SUCCESS_MEASURE
 
@@ -82,7 +82,6 @@ class RearrangeRLEnv(habitat.RLEnv):
 
     def get_info(self, observations):
         return self.habitat_env.get_metrics()
-
 
 @baseline_registry.register_env(name="NavRLEnv")
 class NavRLEnv(habitat.RLEnv):

@@ -13,6 +13,7 @@ from habitat.core.simulator import Sensor, SensorTypes
 from habitat.tasks.nav.nav import PointGoalSensor
 from habitat.tasks.rearrange.rearrange_sim import RearrangeSim
 from habitat.tasks.rearrange.utils import CollisionDetails
+import magnum
 
 
 @registry.register_sensor
@@ -244,6 +245,36 @@ class EEPositionSensor(Sensor):
         local_ee_pos = trans.inverted().transform_point(ee_pos)
 
         return np.array(local_ee_pos)
+
+@registry.register_sensor
+class EEQuatSensor(Sensor):
+    cls_uuid: str = "ee_quat"
+
+    def __init__(self, sim, config, *args, **kwargs):
+        super().__init__(config=config)
+        self._sim = sim
+
+    @staticmethod
+    def _get_uuid(*args, **kwargs):
+        return EEQuatSensor.cls_uuid
+
+    def _get_sensor_type(self, *args, **kwargs):
+        return SensorTypes.TENSOR
+
+    def _get_observation_space(self, *args, **kwargs):
+        return spaces.Box(
+            shape=(4,),
+            low=np.finfo(np.float32).min,
+            high=np.finfo(np.float32).max,
+            dtype=np.float32,
+        )
+
+    def get_observation(self, observations, episode, *args, **kwargs):
+        trans = self._sim.robot.base_transformation
+        trans_in_ee_frame = trans.inverted().__matmul__(self._sim.robot.ee_transform)
+        ee_quat = magnum.Quaternion.from_matrix(trans_in_ee_frame.rotation())
+        ee_quat = np.concatenate((np.array(ee_quat.vector), [ee_quat.scalar,]))
+        return ee_quat
 
 
 @registry.register_sensor
