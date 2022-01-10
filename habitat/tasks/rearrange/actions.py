@@ -351,7 +351,7 @@ class ArmEEAction(SimulatorTaskAction):
         )
 
     def set_desired_ee_pos(self, ee_pos: np.ndarray) -> np.ndarray:
-        self.ee_target += np.array(ee_pos)
+        self.ee_target = np.array(ee_pos) + self.get_ee_pos()
         self.apply_ee_constraints()
 
         ik = self._sim.ik_helper
@@ -386,20 +386,13 @@ class ArmEEAction(SimulatorTaskAction):
             return None
 
 @registry.register_task_action
-class ArmFullEEAction(SimulatorTaskAction):
+class ArmFullEEAction(ArmEEAction):
     """Uses inverse kinematics (requires pybullet) to apply end-effector full (position+orientation) control for the robot's arm."""
 
     def __init__(self, *args, config, sim: RearrangeSim, **kwargs):
         self.ee_target = None
         super().__init__(*args, config=config, sim=sim, **kwargs)
         self._sim: RearrangeSim = sim
-        self.robot_ee_constraints = np.array(
-            [
-                [0.4, 1.2],
-                [-0.7, 0.7],
-                [0.25, 1.5],
-            ]
-        )
 
     def reset(self, *args, **kwargs):
         super().reset()
@@ -410,13 +403,14 @@ class ArmFullEEAction(SimulatorTaskAction):
 
     @property
     def action_space(self):
-        return spaces.Box(shape=(6,), low=-1, high=1, dtype=np.float32)
+        # return spaces.Box(shape=(6,), low=-1, high=1, dtype=np.float32)
+        return spaces.Box(shape=(7,), low=-1, high=1, dtype=np.float32)
 
     def apply_ee_constraints(self):
         self.ee_target[:3] = np.clip(
             self.ee_target[:3],
-            self.robot_ee_constraints[:, 0],
-            self.robot_ee_constraints[:, 1],
+            self._sim.robot.params.ee_constraint[:, 0],
+            self._sim.robot.params.ee_constraint[:, 1],
         )
 
     def set_desired_ee_pos(self, ee_pos: np.ndarray) -> np.ndarray:
@@ -439,8 +433,9 @@ class ArmFullEEAction(SimulatorTaskAction):
     def step(self, ee_pos, should_step=True, **kwargs):
         ee_pos = np.clip(ee_pos, -1, 1)
         ee_pos[:3] *= self._config.EE_CTRL_LIM
-        ee_pos[3:6] *= self._config.EE_CTRL_QUAT_LIM
-        quat = self.rpy_to_quat(ee_pos[3:6])
+        ee_pos[3:] *= self._config.EE_CTRL_QUAT_LIM
+        # quat = self.rpy_to_quat(ee_pos[3:])
+        quat = ee_pos[3:]
         ee_pos = np.concatenate((ee_pos[:3], quat))
         self.set_desired_ee_pos(ee_pos)
 
@@ -468,14 +463,19 @@ class ArmRAPSAction(SimulatorTaskAction):
         self.ee_target = None
         super().__init__(*args, config=config, sim=sim, **kwargs)
         self._sim: RearrangeSim = sim
-        self.robot_ee_constraints = np.array(
-            [
-                [0.4, 1.2],
-                [-0.7, 0.7],
-                [0.25, 1.5],
-            ]
-        )
 
+        if self._config.GRIP_CONTROLLER is not None:
+            grip_controller_cls = eval(self._config.GRIP_CONTROLLER)
+            self.grip_ctrlr: Optional[
+                GripSimulatorTaskAction
+            ] = grip_controller_cls(*args, config=config, sim=sim, **kwargs)
+        else:
+            self.grip_ctrlr = None
+
+        self.disable_grip = False
+        if "DISABLE_GRIP" in config:
+            self.disable_grip = config["DISABLE_GRIP"]
+        self.action_scale = self._config.ACTION_SCALE
         # primitives
         self.primitive_idx_to_name = {
             0: "move_delta_ee_pose",
@@ -503,21 +503,23 @@ class ArmRAPSAction(SimulatorTaskAction):
         )
         self.primitive_name_to_action_idx = dict(
             move_delta_ee_pose=[0, 1, 2],
-            top_x_y_grasp=[3, 4, 5, 6],
-            lift=7,
-            drop=8,
-            move_left=9,
-            move_right=10,
-            move_forward=11,
-            move_backward=12,
-            open_gripper=13,
-            close_gripper=14,
+            top_x_y_grasp=[3, 4, 5],
+            lift=6,
+            drop=7,
+            move_left=8,
+            move_right=9,
+            move_forward=10,
+            move_backward=11,
+            open_gripper=[],
+            close_gripper=[],
         )
-        self.max_arg_len = 15
+        self.max_arg_len = 12
         self.num_primitives = len(self.primitive_name_to_func)
 
     def reset(self, *args, **kwargs):
         super().reset()
+        if self.grip_ctrlr is not None:
+            self.grip_ctrlr.reset(*args, **kwargs)
 
     @property
     def action_space(self):
@@ -533,19 +535,21 @@ class ArmRAPSAction(SimulatorTaskAction):
             )
         )
         action_space = spaces.Box(act_lower, act_upper, dtype=np.float32)
-        return action_space
+        action_spaces = {'action': action_space}
+        return spaces.Dict(action_spaces)
 
     def apply_ee_constraints(self, ee_target):
         ee_target = np.clip(
             ee_target,
-            self.robot_ee_constraints[:, 0],
-            self.robot_ee_constraints[:, 1],
+            self._sim.robot.params.ee_constraint[:, 0],
+            self._sim.robot.params.ee_constraint[:, 1],
         )
         return ee_target
 
-    def set_desired_ee_pos(self, ee_pos: np.ndarray) -> np.ndarray:
-        ee_target = ee_pos + self.get_endeff_pos()
+    def set_desired_ee_pos(self, delta_ee: np.ndarray) -> np.ndarray:
+        ee_target = delta_ee + self.get_endeff_pos()
         ee_target = self.apply_ee_constraints(ee_target)
+        self.ee_target = ee_target
 
         ik = self._sim.ik_helper
 
@@ -560,10 +564,11 @@ class ArmRAPSAction(SimulatorTaskAction):
 
         return des_joint_pos
 
-    def step(self, a, should_step=True, **kwargs):
-        a = np.clip(a, -1.0, 1.0)
-        stats = self.act(a)
-        return stats
+    def step(self, action, should_step=True, **kwargs):
+        action = np.clip(action, -1.0, 1.0)
+        self.img_array = []
+        stats, o = self.act(action)
+        return o
 
     def get_endeff_pos(self,):
         cur_ee = self._sim.ik_helper.calc_fk(
@@ -577,21 +582,19 @@ class ArmRAPSAction(SimulatorTaskAction):
                 return idx
 
     def set_gripper_action(self, gripper_ctrl):
-        if gripper_ctrl > 0.5:
-            # open the gripper
-            pass
-        else:
-            pass
+        if self.grip_ctrlr is not None and not self.disable_grip:
+            self.grip_ctrlr.step(gripper_ctrl, should_step=False)
 
     def _set_action(self, action):
 
         action = action.copy()
         pos_ctrl, gripper_ctrl = action[:3], action[3]
-        pos_ctrl *= 0.05
+        pos_ctrl *= self._config.EE_CTRL_LIM
 
         # Apply action to simulation.
         self.set_desired_ee_pos(pos_ctrl)
-        self.set_gripper_action(gripper_ctrl)
+        if gripper_ctrl is not None:
+            self.set_gripper_action(gripper_ctrl)
 
     def call_render_every_step(self):
         if self.render_every_step:
@@ -610,92 +613,85 @@ class ArmRAPSAction(SimulatorTaskAction):
                     self.render_im_shape[1],
                 )
 
-    def close_gripper(self, d):
+    def close_gripper(self, unused):
         total_reward, total_success = 0, 0
-        for _ in range(300):
+        for _ in range(1):
             a = np.array([0.0, 0.0, 0.0, 1]) #1 means close the gripper
             self._set_action(a)
-            self._sim.step(HabitatSimActions.ARM_EE)
-            # self.call_render_every_step()
-        return np.array((total_reward, total_success))
+            o = self._sim.step(HabitatSimActions.ARM_ACTION)
+        return np.array((total_reward, total_success)), o
 
-    def open_gripper(self, d):
+    def open_gripper(self, unused):
         total_reward, total_success = 0, 0
-        for _ in range(300):
-            a = np.array([0.0, 0.0, 0.0, 0]) #0 means open the gripper
+        for _ in range(1):
+            a = np.array([0.0, 0.0, 0.0, -1]) #-1 means open the gripper
             self._set_action(a)
-            self._sim.step(HabitatSimActions.ARM_EE)
-            # self.call_render_every_step()
-        return np.array((total_reward, total_success))
+            o = self._sim.step(HabitatSimActions.ARM_ACTION)
+        return np.array((total_reward, total_success)), o
 
-    def goto_pose(self, pose, grasp=True):
+    def goto_pose(self, pose, grasp=False):
         total_reward, total_success = 0, 0
-        for i in range(300):
+        for i in range(100):
             delta = pose - self.get_endeff_pos()
-            print(i, np.linalg.norm(delta))
-            if grasp:
-                gripper = 1
-            else:
-                gripper = 0
-            a = np.array([delta[0], delta[1], delta[2], gripper])
+            a = np.array([delta[0], delta[1], delta[2], None])
             self._set_action(a)
-            self._sim.step(HabitatSimActions.ARM_EE)
-            # self.call_render_every_step()
-        return np.array((total_reward, total_success))
+            o = self._sim.step(HabitatSimActions.ARM_ACTION)
+            # self.img_array.append(o['robot_third_rgb'])
+        return np.array((total_reward, total_success)), o
 
-    def top_x_y_grasp(self, xyzd):
-        x_dist, y_dist, z_dist, d = xyzd
-        stats = self.open_gripper(1)
-        stats += self.move_delta_ee_pose(np.array([x_dist, y_dist, 0]))
-        stats += self.drop(z_dist)
-        stats += self.close_gripper(d)
-        return stats
+    def top_x_y_grasp(self, xyz):
+        x_dist, y_dist, z_dist = xyz
+        stats, _ = self.move_delta_ee_pose(np.array([x_dist, y_dist, 0]))
+        stats += self.drop(z_dist)[0]
+        stats_, o = self.close_gripper(1)
+        stats += stats_
+        return stats, o
 
     def move_delta_ee_pose(self, pose):
-        stats = self.goto_pose(self.get_endeff_pos() + pose)
-        return stats
+        stats, o = self.goto_pose(self.get_endeff_pos() + pose)
+        return stats, o
 
     def lift(self, z_dist):
         z_dist = np.maximum(z_dist, 0.0)
-        stats = self.goto_pose(
+        stats, o = self.goto_pose(
             self.get_endeff_pos() + np.array([0.0, 0.0, z_dist]), grasp=True
         )
-        return stats
+        return stats, o
 
     def drop(self, z_dist):
         z_dist = np.maximum(z_dist, 0.0)
-        stats = self.goto_pose(
+        stats, o = self.goto_pose(
             self.get_endeff_pos() + np.array([0.0, 0.0, -z_dist]), grasp=True
         )
-        return stats
+        return stats, o
 
     def move_left(self, x_dist):
         x_dist = np.maximum(x_dist, 0.0)
-        stats = self.goto_pose(
+        stats, o = self.goto_pose(
             self.get_endeff_pos() + np.array([-x_dist, 0.0, 0.0]), grasp=True
         )
-        return stats
+        return stats, o
 
     def move_right(self, x_dist):
         x_dist = np.maximum(x_dist, 0.0)
-        stats = self.goto_pose(
+        stats, o = self.goto_pose(
             self.get_endeff_pos() + np.array([x_dist, 0.0, 0.0]), grasp=True
         )
-        return stats
+        return stats, o
 
     def move_forward(self, y_dist):
         y_dist = np.maximum(y_dist, 0.0)
-        stats = self.goto_pose(
+        stats, o = self.goto_pose(
             self.get_endeff_pos() + np.array([0.0, y_dist, 0.0]), grasp=True
         )
-        return stats
+        return stats, o
 
     def move_backward(self, y_dist):
         y_dist = np.maximum(y_dist, 0.0)
-        stats = self.goto_pose(
+        stats, o = self.goto_pose(
             self.get_endeff_pos() + np.array([0.0, -y_dist, 0.0]), grasp=True
         )
-        return stats
+        return stats, o
 
     def break_apart_action(self, a):
         broken_a = {}
@@ -712,9 +708,9 @@ class ArmRAPSAction(SimulatorTaskAction):
         primitive_name_to_action_dict = self.break_apart_action(primitive_args)
         primitive_action = primitive_name_to_action_dict[primitive_name]
         primitive = self.primitive_name_to_func[primitive_name]
-        stats = primitive(
+        stats, o = primitive(
             primitive_action,
         )
-        return stats
+        return stats, o
 
 

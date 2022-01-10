@@ -116,9 +116,10 @@ TASK:
             ARM_JOINT_DIMENSIONALITY: 7
             GRASP_THRESH_DIST: 0.15
             DISABLE_GRIP: False
-            DELTA_POS_LIMIT: 0.025q
+            DELTA_POS_LIMIT: 0.025
             EE_CTRL_LIM: 0.015
             EE_CTRL_QUAT_LIM: 0.03
+            ACTION_SCALE: 1.0
     POSSIBLE_ACTIONS:
         - ARM_ACTION
 
@@ -132,15 +133,18 @@ SIMULATOR:
         HEIGHT: 1.5
         IS_SET_START_STATE: False
         RADIUS: 0.1
-        SENSORS: [HEAD_DEPTH_SENSOR]
+        # SENSORS: [HEAD_DEPTH_SENSOR, THIRD_RGB_SENSOR]
         START_POSITION: [0, 0, 0]
         START_ROTATION: [0, 0, 0, 1]
-    HEAD_DEPTH_SENSOR:
-        WIDTH: 32
-        HEIGHT: 32
-        MIN_DEPTH: 0.0
-        MAX_DEPTH: 10.0
-        NORMALIZE_DEPTH: True
+    # HEAD_DEPTH_SENSOR:
+    #     WIDTH: 32
+    #     HEIGHT: 32
+    #     MIN_DEPTH: 0.0
+    #     MAX_DEPTH: 10.0
+    #     NORMALIZE_DEPTH: True
+    # THIRD_RGB_SENSOR:
+    #     WIDTH: 512
+    #     HEIGHT: 512
 
     # Agent setup
     ARM_REST: [0.6, 0.0, 0.9]
