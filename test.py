@@ -30,7 +30,6 @@ observations = env.reset()  # noqa: F841
 print("Agent acting inside environment.")
 count_steps = 0
 
-from moviepy.editor import ImageSequenceClip
 
 for i in range(1):
     a = env.action_space.sample() * .25

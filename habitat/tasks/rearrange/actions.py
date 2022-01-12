@@ -596,23 +596,6 @@ class ArmRAPSAction(SimulatorTaskAction):
         if gripper_ctrl is not None:
             self.set_gripper_action(gripper_ctrl)
 
-    def call_render_every_step(self):
-        if self.render_every_step:
-            if self.render_mode == "rgb_array":
-                self.img_array.append(
-                    self.render(
-                        self.render_mode,
-                        self.render_im_shape[0],
-                        self.render_im_shape[1],
-                    )
-                )
-            else:
-                self.render(
-                    self.render_mode,
-                    self.render_im_shape[0],
-                    self.render_im_shape[1],
-                )
-
     def close_gripper(self, unused):
         total_reward, total_success = 0, 0
         for _ in range(1):
@@ -631,7 +614,7 @@ class ArmRAPSAction(SimulatorTaskAction):
 
     def goto_pose(self, pose, grasp=False):
         total_reward, total_success = 0, 0
-        for i in range(100):
+        for i in range(self._config.GOTO_POSE_ITERATIONS):
             delta = pose - self.get_endeff_pos()
             a = np.array([delta[0], delta[1], delta[2], None])
             self._set_action(a)
