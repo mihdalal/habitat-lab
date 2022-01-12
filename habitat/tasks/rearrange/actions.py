@@ -403,7 +403,6 @@ class ArmFullEEAction(ArmEEAction):
 
     @property
     def action_space(self):
-        # return spaces.Box(shape=(6,), low=-1, high=1, dtype=np.float32)
         return spaces.Box(shape=(7,), low=-1, high=1, dtype=np.float32)
 
     def apply_ee_constraints(self):
@@ -434,7 +433,6 @@ class ArmFullEEAction(ArmEEAction):
         ee_pos = np.clip(ee_pos, -1, 1)
         ee_pos[:3] *= self._config.EE_CTRL_LIM
         ee_pos[3:] *= self._config.EE_CTRL_QUAT_LIM
-        # quat = self.rpy_to_quat(ee_pos[3:])
         quat = ee_pos[3:]
         ee_pos = np.concatenate((ee_pos[:3], quat))
         self.set_desired_ee_pos(ee_pos)
@@ -450,10 +448,6 @@ class ArmFullEEAction(ArmEEAction):
             return self._sim.step(HabitatSimActions.ARM_EE)
         else:
             return None
-
-    def rpy_to_quat(self, rpy):
-        q = quaternion.from_euler_angles(rpy)
-        return np.array([q.x, q.y, q.z, q.w])
 
 @registry.register_task_action
 class ArmRAPSAction(SimulatorTaskAction):
