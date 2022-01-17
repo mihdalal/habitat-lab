@@ -381,3 +381,202 @@ class IkHelper:
                 self.robo_id, self.pb_link_idx, targ_ee, physicsClientId=self.pc_id
             )
         return js[: self._arm_len]
+
+    def quat2mat(self, quaternion):
+        """
+        Converts given quaternion (x, y, z, w) to matrix.
+        Args:
+            quaternion: vec4 float angles
+        Returns:
+            3x3 rotation matrix
+        """
+        import math
+        q = np.array(quaternion, dtype=np.float32, copy=True)[[3, 0, 1, 2]]
+        n = np.dot(q, q)
+        if n < np.finfo(float).eps * 4.:
+            return np.identity(3)
+        q *= math.sqrt(2.0 / n)
+        q = np.outer(q, q)
+        return np.array(
+            [
+                [1.0 - q[2, 2] - q[3, 3], q[1, 2] - q[3, 0], q[1, 3] + q[2, 0]],
+                [q[1, 2] + q[3, 0], 1.0 - q[1, 1] - q[3, 3], q[2, 3] - q[1, 0]],
+                [q[1, 3] - q[2, 0], q[2, 3] + q[1, 0], 1.0 - q[1, 1] - q[2, 2]],
+            ]
+        )
+
+
+    def pose2mat(self, pose):
+        """
+        Converts pose to homogeneous matrix.
+        Args:
+            pose: a (pos, orn) tuple where pos is vec3 float cartesian, and
+                orn is vec4 float quaternion.
+        Returns:
+            4x4 homogeneous matrix
+        """
+        homo_pose_mat = np.zeros((4, 4), dtype=np.float32)
+        homo_pose_mat[:3, :3] = self.quat2mat(pose[1])
+        homo_pose_mat[:3, 3] = np.array(pose[0], dtype=np.float32)
+        homo_pose_mat[3, 3] = 1.
+        return homo_pose_mat
+
+    def pose_in_A_to_pose_in_B(self, pose_A, pose_A_in_B):
+        """
+        Converts a homogenous matrix corresponding to a point C in frame A
+        to a homogenous matrix corresponding to the same point C in frame B.
+        Args:
+            pose_A: numpy array of shape (4,4) corresponding to the pose of C in frame A
+            pose_A_in_B: numpy array of shape (4,4) corresponding to the pose of A in frame B
+        Returns:
+            numpy array of shape (4,4) corresponding to the pose of C in frame B
+        """
+
+        # pose of A in B takes a point in A and transforms it to a point in C.
+
+        # pose of C in B = pose of A in B * pose of C in A
+        # take a point in C, transform it to A, then to B
+        # T_B^C = T_A^C * T_B^A
+        return pose_A_in_B.dot(pose_A)
+
+    def mat2quat(self, rmat, precise=False):
+        from scipy import linalg
+        import math
+        """
+        Converts given rotation matrix to quaternion.
+        Args:
+            rmat: 3x3 rotation matrix
+            precise: If isprecise is True, the input matrix is assumed to be a precise
+                rotation matrix and a faster algorithm is used.
+        Returns:
+            vec4 float quaternion angles
+        """
+        M = np.array(rmat, dtype=np.float32, copy=False)[:3, :3]
+        if precise:
+            q = np.empty((4,))
+            t = np.trace(M)
+            if t > M[3, 3]:
+                q[0] = t
+                q[3] = M[1, 0] - M[0, 1]
+                q[2] = M[0, 2] - M[2, 0]
+                q[1] = M[2, 1] - M[1, 2]
+            else:
+                i, j, k = 0, 1, 2
+                if M[1, 1] > M[0, 0]:
+                    i, j, k = 1, 2, 0
+                if M[2, 2] > M[i, i]:
+                    i, j, k = 2, 0, 1
+                t = M[i, i] - (M[j, j] + M[k, k]) + M[3, 3]
+                q[i] = t
+                q[j] = M[i, j] + M[j, i]
+                q[k] = M[k, i] + M[i, k]
+                q[3] = M[k, j] - M[j, k]
+                q = q[[3, 0, 1, 2]]
+            q *= 0.5 / math.sqrt(t * M[3, 3])
+        else:
+            m00 = M[0, 0]
+            m01 = M[0, 1]
+            m02 = M[0, 2]
+            m10 = M[1, 0]
+            m11 = M[1, 1]
+            m12 = M[1, 2]
+            m20 = M[2, 0]
+            m21 = M[2, 1]
+            m22 = M[2, 2]
+            # symmetric matrix K
+            K = np.array(
+                [
+                    [m00 - m11 - m22, 0.0, 0.0, 0.0],
+                    [m01 + m10, m11 - m00 - m22, 0.0, 0.0],
+                    [m02 + m20, m12 + m21, m22 - m00 - m11, 0.0],
+                    [m21 - m12, m02 - m20, m10 - m01, m00 + m11 + m22],
+                ]
+            )
+            K /= 3.0
+            # quaternion is Eigen vector of K that corresponds to largest eigenvalue
+            w, V = linalg.eigh(K)
+            q = V[[3, 0, 1, 2], np.argmax(w)]
+        if q[0] < 0.0:
+            np.negative(q, q)
+        return q[[1, 2, 3, 0]]
+
+    def mat2pose(self, hmat):
+        """
+        Converts a homogeneous 4x4 matrix into pose.
+        Args:
+            hmat: a 4x4 homogeneous matrix
+        Returns:
+            (pos, orn) tuple where pos is vec3 float in cartesian,
+                orn is vec4 float quaternion
+        """
+        pos = hmat[:3, 3]
+        orn = self.mat2quat(hmat[:3, :3])
+        return pos, orn
+
+    def pose_inv(self, pose):
+        """
+        Computes the inverse of a homogenous matrix corresponding to the pose of some
+        frame B in frame A. The inverse is the pose of frame A in frame B.
+        Args:
+            pose: numpy array of shape (4,4) for the pose to inverse
+        Returns:
+            numpy array of shape (4,4) for the inverse pose
+        """
+
+        # Note, the inverse of a pose matrix is the following
+        # [R t; 0 1]^-1 = [R.T -R.T*t; 0 1]
+
+        # Intuitively, this makes sense.
+        # The original pose matrix translates by t, then rotates by R.
+        # We just invert the rotation by applying R-1 = R.T, and also translate back.
+        # Since we apply translation first before rotation, we need to translate by
+        # -t in the original frame, which is -R-1*t in the new frame, and then rotate back by
+        # R-1 to align the axis again.
+
+        pose_inv = np.zeros((4, 4))
+        pose_inv[:3, :3] = pose[:3, :3].T
+        pose_inv[:3, 3] = -pose_inv[:3, :3].dot(pose[:3, 3])
+        pose_inv[3, 3] = 1.0
+        return pose_inv
+
+    def bullet_base_pose_to_world_pose(self, pose_in_base):
+        """
+        Convert a pose in the base frame to a pose in the world frame.
+        Args:
+            pose_in_base: a (pos, orn) tuple.
+        Returns:
+            pose_in world: a (pos, orn) tuple.
+        """
+        pose_in_base = self.pose2mat(pose_in_base)
+
+        base_pos_in_world, base_orn_in_world = \
+            np.array(p.getBasePositionAndOrientation(self.robo_id, physicsClientId=self.pc_id))
+
+        base_pose_in_world = self.pose2mat((base_pos_in_world, base_orn_in_world))
+
+        pose_in_world = self.pose_in_A_to_pose_in_B(
+            pose_A=pose_in_base, pose_A_in_B=base_pose_in_world
+        )
+        return self.mat2pose(pose_in_world)
+
+    def ik_robot_eef_joint_cartesian_pose(self):
+        """
+        Returns the current cartesian pose of the last joint of the ik robot with respect to the base frame as
+        a (pos, orn) tuple where orn is a x-y-z-w quaternion
+        """
+        eef_pos_in_world = np.array(p.getLinkState(self.robo_id, self.pb_link_idx, physicsClientId=self.pc_id)[0])
+        eef_orn_in_world = np.array(p.getLinkState(self.robo_id, self.pb_link_idx,physicsClientId=self.pc_id)[1])
+        eef_pose_in_world = self.pose2mat((eef_pos_in_world, eef_orn_in_world))
+
+        base_pos_in_world = np.array(p.getBasePositionAndOrientation(self.robo_id,physicsClientId=self.pc_id)[0])
+        base_orn_in_world = np.array(p.getBasePositionAndOrientation(self.robo_id,physicsClientId=self.pc_id)[1])
+        base_pose_in_world = self.pose2mat((base_pos_in_world, base_orn_in_world))
+        world_pose_in_base = self.pose_inv(base_pose_in_world)
+
+        eef_pose_in_base = self.pose_in_A_to_pose_in_B(
+            pose_A=eef_pose_in_world, pose_A_in_B=world_pose_in_base
+        )
+
+        return self.mat2pose(eef_pose_in_base)
+
+

@@ -482,6 +482,9 @@ class ArmRAPSAction(SimulatorTaskAction):
             7: "move_backward",
             8: "open_gripper",
             9: "close_gripper",
+            # 10: "rotate_about_y_axis",
+            # 11: "rotate_about_x_axis",
+            # 12: "angled_x_y_grasp",
         }
         self.primitive_name_to_func = dict(
             move_delta_ee_pose=self.move_delta_ee_pose,
@@ -494,6 +497,9 @@ class ArmRAPSAction(SimulatorTaskAction):
             move_backward=self.move_backward,
             open_gripper=self.open_gripper,
             close_gripper=self.close_gripper,
+            # rotate_about_y_axis=self.rotate_about_y_axis,
+            # rotate_about_x_axis=self.rotate_about_x_axis,
+            # angled_x_y_grasp=self.angled_x_y_grasp,
         )
         self.primitive_name_to_action_idx = dict(
             move_delta_ee_pose=[0, 1, 2],
@@ -506,7 +512,11 @@ class ArmRAPSAction(SimulatorTaskAction):
             move_backward=11,
             open_gripper=[],
             close_gripper=[],
+            # rotate_about_y_axis=12,
+            # rotate_about_x_axis=13,
+            # angled_x_y_grasp=[14, 15, 16],
         )
+        # self.max_arg_len = 17
         self.max_arg_len = 12
         self.num_primitives = len(self.primitive_name_to_func)
 
@@ -533,8 +543,8 @@ class ArmRAPSAction(SimulatorTaskAction):
         return spaces.Dict(action_spaces)
 
     def apply_ee_constraints(self, ee_target):
-        ee_target = np.clip(
-            ee_target,
+        ee_target[:3] = np.clip(
+            ee_target[:3],
             self._sim.robot.params.ee_constraint[:, 0],
             self._sim.robot.params.ee_constraint[:, 1],
         )
@@ -542,8 +552,8 @@ class ArmRAPSAction(SimulatorTaskAction):
 
     def set_desired_ee_pos(self, delta_ee: np.ndarray) -> np.ndarray:
         ee_target = delta_ee + self.get_endeff_pos()
+        # ee_target = np.concatenate(self._sim.ik_helper.bullet_base_pose_to_world_pose((ee_target[:3], ee_target[3:])))
         ee_target = self.apply_ee_constraints(ee_target)
-        self.ee_target = ee_target
 
         ik = self._sim.ik_helper
 
@@ -567,7 +577,9 @@ class ArmRAPSAction(SimulatorTaskAction):
     def get_endeff_pos(self,):
         cur_ee = self._sim.ik_helper.calc_fk(
             np.array(self._sim.robot.arm_joint_pos)
-        )[:3]
+        )
+        # cur_ee = self._sim.ik_helper.ik_robot_eef_joint_cartesian_pose()
+        # cur_ee = np.concatenate(cur_ee)
         return cur_ee
 
     def get_idx_from_primitive_name(self, primitive_name):
@@ -582,18 +594,19 @@ class ArmRAPSAction(SimulatorTaskAction):
     def _set_action(self, action):
 
         action = action.copy()
-        pos_ctrl, gripper_ctrl = action[:3], action[3]
+        pos_ctrl, rot_ctrl, gripper_ctrl = action[:3], action[3:7], action[-1]
         pos_ctrl *= self._config.EE_CTRL_LIM
+        rot_ctrl *= self._config.EE_CTRL_QUAT_LIM
 
         # Apply action to simulation.
-        self.set_desired_ee_pos(pos_ctrl)
+        self.set_desired_ee_pos(np.concatenate((pos_ctrl, rot_ctrl)))
         if gripper_ctrl is not None:
             self.set_gripper_action(gripper_ctrl)
 
     def close_gripper(self, unused):
         total_reward, total_success = 0, 0
         for _ in range(1):
-            a = np.array([0.0, 0.0, 0.0, 1]) #1 means close the gripper
+            a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1]) #1 means close the gripper
             self._set_action(a)
             o = self._sim.step(HabitatSimActions.ARM_ACTION)
         return np.array((total_reward, total_success)), o
@@ -601,7 +614,7 @@ class ArmRAPSAction(SimulatorTaskAction):
     def open_gripper(self, unused):
         total_reward, total_success = 0, 0
         for _ in range(1):
-            a = np.array([0.0, 0.0, 0.0, -1]) #-1 means open the gripper
+            a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1]) #-1 means open the gripper
             self._set_action(a)
             o = self._sim.step(HabitatSimActions.ARM_ACTION)
         return np.array((total_reward, total_success)), o
@@ -609,64 +622,107 @@ class ArmRAPSAction(SimulatorTaskAction):
     def goto_pose(self, pose, grasp=False):
         total_reward, total_success = 0, 0
         for i in range(self._config.GOTO_POSE_ITERATIONS):
-            delta = pose - self.get_endeff_pos()
-            a = np.array([delta[0], delta[1], delta[2], None])
+            delta = pose - self.get_endeff_pos()[:3]
+            a = np.array([delta[0], delta[1], delta[2], 0.0, 0.0, 0.0, 0.0, None])
             self._set_action(a)
             o = self._sim.step(HabitatSimActions.ARM_ACTION)
             # self.img_array.append(o['robot_third_rgb'])
         return np.array((total_reward, total_success)), o
 
+    def rpy_to_quat(self, rpy):
+        q = quaternion.from_euler_angles(rpy)
+        return np.array([q.x, q.y, q.z, q.w])
+
+    def quat_to_rpy(self, q):
+        q = quaternion.quaternion(q[0], q[1], q[2], q[3])
+        rpy = quaternion.as_euler_angles(q)
+        rpy = np.array([rpy[0], rpy[1], rpy[2]])
+        return rpy
+
+    def rotate_ee(self, rpy):
+        total_reward, total_success = 0, 0
+        for _ in range(self._config.GOTO_POSE_ITERATIONS):
+            quat = self.rpy_to_quat(rpy)
+            quat_delta = quat - self.get_endeff_pos()[3:]
+            a = np.array([0.0, 0.0, 0.0, *quat_delta, None])
+            self._set_action(a)
+            o = self._sim.step(HabitatSimActions.ARM_ACTION)
+            # self.img_array.append(o['robot_third_rgb'])
+        return np.array((total_reward, total_success)), o
+
+    def rotate_about_x_axis(self, angle):
+        # print(self._sim._ik_helper.bullet_base_pose_to_world_pose((self.get_endeff_pos()[:3], self.get_endeff_pos()[3:])))
+        angle = np.clip(angle, -np.pi, np.pi)
+        rotation = self.quat_to_rpy(self.get_endeff_pos()[3:]) - np.array([angle, 0, 0])
+        stats, o = self.rotate_ee(rotation)
+        return stats, o
+
+    def rotate_about_y_axis(self, angle):
+        angle = np.clip(angle, -np.pi, np.pi)
+        rotation = self.quat_to_rpy(self.get_endeff_pos()[3:]) - np.array([0, 0, angle])
+        stats, o = self.rotate_ee(rotation)
+        return stats, o
+
+    def angled_x_y_grasp(self, angle_and_xy):
+        angle, x_dist, y_dist = angle_and_xy
+        angle = np.clip(angle, -np.pi, np.pi)
+        rotation = self.quat_to_rpy(self.get_endeff_pos()[3:]) - np.array([angle, 0, 0])
+        self.rotate_ee(rotation)
+        self.goto_pose(self.get_ee_pos() + np.array([x_dist, 0.0, 0]))
+        self.goto_pose(self.get_ee_pos() + np.array([0.0, y_dist, 0]))
+        stats, o = self.close_gripper(1)
+        return stats, o
+
     def top_x_y_grasp(self, xyz):
         x_dist, y_dist, z_dist = xyz
-        stats, _ = self.move_delta_ee_pose(np.array([x_dist, y_dist, 0]))
-        stats += self.drop(z_dist)[0]
-        stats_, o = self.close_gripper(1)
-        stats += stats_
+        self.move_delta_ee_pose(np.array([x_dist, y_dist, 0]))
+        self.drop(z_dist)[0]
+        stats, o = self.close_gripper(1)
         return stats, o
 
     def move_delta_ee_pose(self, pose):
-        stats, o = self.goto_pose(self.get_endeff_pos() + pose)
+        stats, o = self.goto_pose(self.get_endeff_pos()[:3] + pose)
         return stats, o
 
     def lift(self, z_dist):
         z_dist = np.maximum(z_dist, 0.0)
         stats, o = self.goto_pose(
-            self.get_endeff_pos() + np.array([0.0, 0.0, z_dist]), grasp=True
+            self.get_endeff_pos()[:3] + np.array([0.0, 0.0, z_dist]), grasp=True
         )
         return stats, o
 
     def drop(self, z_dist):
         z_dist = np.maximum(z_dist, 0.0)
         stats, o = self.goto_pose(
-            self.get_endeff_pos() + np.array([0.0, 0.0, -z_dist]), grasp=True
+            self.get_endeff_pos()[:3] + np.array([0.0, 0.0, -z_dist]), grasp=True
         )
         return stats, o
 
     def move_left(self, x_dist):
         x_dist = np.maximum(x_dist, 0.0)
         stats, o = self.goto_pose(
-            self.get_endeff_pos() + np.array([-x_dist, 0.0, 0.0]), grasp=True
+            self.get_endeff_pos()[:3] + np.array([-x_dist, 0.0, 0.0]), grasp=True
         )
         return stats, o
 
     def move_right(self, x_dist):
         x_dist = np.maximum(x_dist, 0.0)
         stats, o = self.goto_pose(
-            self.get_endeff_pos() + np.array([x_dist, 0.0, 0.0]), grasp=True
+            self.get_endeff_pos()[:3] + np.array([x_dist, 0.0, 0.0]), grasp=True
         )
         return stats, o
 
     def move_forward(self, y_dist):
         y_dist = np.maximum(y_dist, 0.0)
         stats, o = self.goto_pose(
-            self.get_endeff_pos() + np.array([0.0, y_dist, 0.0]), grasp=True
+            self.get_endeff_pos()[:3] + np.array([0.0, y_dist, 0.0]), grasp=True
         )
         return stats, o
 
     def move_backward(self, y_dist):
         y_dist = np.maximum(y_dist, 0.0)
         stats, o = self.goto_pose(
-            self.get_endeff_pos() + np.array([0.0, -y_dist, 0.0]), grasp=True
+            self.get_endeff_pos()[:3] + np.array([0.0, -y_dist, 0.0]), grasp=True
         )
         return stats, o
 
@@ -686,7 +742,7 @@ class ArmRAPSAction(SimulatorTaskAction):
         primitive_action = primitive_name_to_action_dict[primitive_name]
         primitive = self.primitive_name_to_func[primitive_name]
         stats, o = primitive(
-            primitive_action,
+            primitive_action
         )
         return stats, o
 
