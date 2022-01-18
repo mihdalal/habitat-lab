@@ -138,14 +138,14 @@ SIMULATOR:
         START_POSITION: [0, 0, 0]
         START_ROTATION: [0, 0, 0, 1]
     HEAD_DEPTH_SENSOR:
-        WIDTH: 32
-        HEIGHT: 32
+        WIDTH: 64
+        HEIGHT: 64
         MIN_DEPTH: 0.0
         MAX_DEPTH: 10.0
         NORMALIZE_DEPTH: True
-    # THIRD_RGB_SENSOR:
-    #     WIDTH: 512
-    #     HEIGHT: 512
+    THIRD_RGB_SENSOR:
+        WIDTH: 512
+        HEIGHT: 512
 
     # Agent setup
     ARM_REST: [0.6, 0.0, 0.9]

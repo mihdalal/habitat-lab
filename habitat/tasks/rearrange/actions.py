@@ -609,6 +609,8 @@ class ArmRAPSAction(SimulatorTaskAction):
             a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1]) #1 means close the gripper
             self._set_action(a)
             o = self._sim.step(HabitatSimActions.ARM_ACTION)
+            if 'robot_third_rgb' in o.keys():
+                self.img_array.append(o['robot_third_rgb'])
         return np.array((total_reward, total_success)), o
 
     def open_gripper(self, unused):
@@ -617,6 +619,8 @@ class ArmRAPSAction(SimulatorTaskAction):
             a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1]) #-1 means open the gripper
             self._set_action(a)
             o = self._sim.step(HabitatSimActions.ARM_ACTION)
+            if 'robot_third_rgb' in o.keys():
+                self.img_array.append(o['robot_third_rgb'])
         return np.array((total_reward, total_success)), o
 
     def goto_pose(self, pose, grasp=False):
@@ -626,7 +630,8 @@ class ArmRAPSAction(SimulatorTaskAction):
             a = np.array([delta[0], delta[1], delta[2], 0.0, 0.0, 0.0, 0.0, None])
             self._set_action(a)
             o = self._sim.step(HabitatSimActions.ARM_ACTION)
-            # self.img_array.append(o['robot_third_rgb'])
+            if 'robot_third_rgb' in o.keys():
+                self.img_array.append(o['robot_third_rgb'])
         return np.array((total_reward, total_success)), o
 
     def rpy_to_quat(self, rpy):

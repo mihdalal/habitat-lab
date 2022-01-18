@@ -43,6 +43,15 @@ def smash_observation_space(obs_space, limit_keys):
         return spaces.Box(
             shape=(total_dim,), low=-1.0, high=1.0, dtype=np.float32
         )
+    elif 'robot_head_depth' in limit_keys:
+        total_dim = sum([obs_space[k].shape[0] for k in limit_keys if k != 'robot_head_depth'])
+        low = np.ones(total_dim) * -1
+        high = np.ones(total_dim) * 1
+        total_dim += np.prod(obs_space['robot_head_depth'].low.shape)
+        low = np.concatenate([low, obs_space['robot_head_depth'].low.reshape(-1)])
+        high = np.concatenate([high, obs_space['robot_head_depth'].high.reshape(-1)])
+        return spaces.Box(low=low, high=high, dtype=np.float32)
+
     return obs_space
 
 
@@ -194,8 +203,7 @@ class HabGymWrapper(gym.Env):
     def _transform_obs(self, obs):
         if self._save_orig_obs:
             self.orig_obs = obs
-        observation = {"observation": [obs[k] for k in self._gym_obs_keys]}
-
+        observation = {"observation": [obs[k].reshape(-1) for k in self._gym_obs_keys]}
         if len(self._gym_goal_keys) > 0:
             observation["desired_goal"] = [obs[k] for k in self._gym_goal_keys]
 
