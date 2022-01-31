@@ -93,8 +93,11 @@ class ArmAction(SimulatorTaskAction):
         self.arm_ctrlr.step(arm_action, should_step=False)
         if self.grip_ctrlr is not None and not self.disable_grip:
             self.grip_ctrlr.step(grip_action, should_step=False)
-
-        return self._sim.step(HabitatSimActions.ARM_ACTION)
+        self.img_array = []
+        o = self._sim.step(HabitatSimActions.ARM_ACTION)
+        if 'robot_third_rgb' in o.keys():
+            self.img_array.append(o['robot_third_rgb'])
+        return o
 
 
 @registry.register_task_action
@@ -543,11 +546,6 @@ class ArmRAPSAction(SimulatorTaskAction):
         return spaces.Dict(action_spaces)
 
     def apply_ee_constraints(self, ee_target):
-        ee_target[:3] = np.clip(
-            ee_target[:3],
-            self._sim.robot.params.ee_constraint[:, 0],
-            self._sim.robot.params.ee_constraint[:, 1],
-        )
         return ee_target
 
     def set_desired_ee_pos(self, delta_ee: np.ndarray) -> np.ndarray:
@@ -605,22 +603,20 @@ class ArmRAPSAction(SimulatorTaskAction):
 
     def close_gripper(self, unused):
         total_reward, total_success = 0, 0
-        for _ in range(1):
-            a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1]) #1 means close the gripper
-            self._set_action(a)
-            o = self._sim.step(HabitatSimActions.ARM_ACTION)
-            if 'robot_third_rgb' in o.keys():
-                self.img_array.append(o['robot_third_rgb'])
+        a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1]) #1 means close the gripper
+        self._set_action(a)
+        o = self._sim.step(HabitatSimActions.ARM_ACTION)
+        if 'robot_third_rgb' in o.keys():
+            self.img_array.extend([o['robot_third_rgb']]*self._config.GOTO_POSE_ITERATIONS)
         return np.array((total_reward, total_success)), o
 
     def open_gripper(self, unused):
         total_reward, total_success = 0, 0
-        for _ in range(1):
-            a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1]) #-1 means open the gripper
-            self._set_action(a)
-            o = self._sim.step(HabitatSimActions.ARM_ACTION)
-            if 'robot_third_rgb' in o.keys():
-                self.img_array.append(o['robot_third_rgb'])
+        a = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1]) #-1 means open the gripper
+        self._set_action(a)
+        o = self._sim.step(HabitatSimActions.ARM_ACTION)
+        if 'robot_third_rgb' in o.keys():
+            self.img_array.extend([o['robot_third_rgb']]*self._config.GOTO_POSE_ITERATIONS)
         return np.array((total_reward, total_success)), o
 
     def goto_pose(self, pose, grasp=False):
